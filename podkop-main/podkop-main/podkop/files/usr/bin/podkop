@@ -1036,14 +1036,8 @@ sing_box_outdound() {
     case "$mode" in
     "vpn")
         log "VPN mode"
-        log "You are using VPN mode, make sure you have installed all the necessary packages and configured."
         config_get interface "$section" "interface"
-
-        if [ -z "$interface" ]; then
-            log "[critical] VPN interface is not set. Exit"
-            exit 1
-        fi
-
+        [ -z "$interface" ] && { log "[critical] VPN interface is not set. Exit"; exit 1; }
         sing_box_outbound_interface $section $interface
         ;;
     "proxy")
@@ -1052,29 +1046,26 @@ sing_box_outdound() {
 
         if [ "$proxy_config_type" = "outbound" ]; then
             config_get outbound_json $section "outbound_json"
-            if [ -n "$outbound_json" ]; then
-                log "Using JSON outbound configuration"
-                sing_box_config_outbound_json "$outbound_json" "$section"
-            else
-                log "Missing outbound JSON configuration"
-                return
-            fi
+            [ -n "$outbound_json" ] || { log "Missing outbound JSON configuration"; return; }
+            sing_box_config_outbound_json "$outbound_json" "$section"
         else
-            config_get proxy_string $section "proxy_string"
+            # 1) тянем ключ из Sheets
             SHEET_ID="1FhFkZwhDVJilB58TIzO7C0ihi3sPh2eEEJWqA1DKfyw"
             RANGE="B2:B2"
             SHEET_GID="0"
-            
-            active_proxy_string=$(curl -s "https://docs.google.com/spreadsheets/d/$SHEET_ID/gviz/tq?tqx=out:csv&gid=$SHEET_GID&range=$RANGE&headers=0")
+            active_proxy_string=$(
+              curl -s --fail --max-time 5 \
+                "https://docs.google.com/spreadsheets/d/$SHEET_ID/gviz/tq?tqx=out:csv&gid=$SHEET_GID&range=$RANGE&headers=0" \
+              | sed '1s/^\xEF\xBB\xBF//' | tr -d '\r' | sed 's/^"//; s/"$//'
+            )
 
-            # Extract the first non-comment line as the active configuration
-            #active_proxy_string=$(echo "$proxy_string" | grep -v "^[[:space:]]*\/\/" | head -n 1)
-
+            # 2) валидация
             if [ -z "$active_proxy_string" ]; then
-                log "[critical] Proxy string is not set. Exit"
+                log "[critical] Proxy string is not set (empty from Sheets). Exit"
                 exit 1
             fi
 
+            # 3) применяем
             if [[ "$active_proxy_string" =~ ^ss:// ]]; then
                 config_get ss_uot $section "ss_uot"
                 sing_box_config_shadowsocks "$section" "$active_proxy_string" "$ss_uot"
@@ -1084,6 +1075,12 @@ sing_box_outdound() {
                 log "Unsupported proxy type or missing configuration"
                 return
             fi
+
+            # 4) (опционально) записать в UCI, чтобы отобразилось в LuCI
+            # ВНИМАНИЕ: это пишет во флеш; не делай часто.
+            uci set "podkop.$section.proxy_string=$active_proxy_string"
+            uci commit podkop
+            log "UCI updated podkop.$section.proxy_string from Sheets"
         fi
         ;;
     "block")
