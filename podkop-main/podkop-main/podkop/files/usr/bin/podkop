@@ -1037,62 +1037,91 @@ sing_box_outdound() {
     "vpn")
         log "VPN mode"
         config_get interface "$section" "interface"
-        [ -z "$interface" ] && { log "[critical] VPN interface is not set. Exit"; exit 1; }
-        sing_box_outbound_interface $section $interface
+        if [ -z "$interface" ]; then
+            log "[critical] VPN interface is not set. Exit"
+            exit 1
+        fi
+        sing_box_outbound_interface "$section" "$interface"
         ;;
+
     "proxy")
         log "Proxy mode"
         config_get proxy_config_type "$section" "proxy_config_type"
 
         if [ "$proxy_config_type" = "outbound" ]; then
-            config_get outbound_json $section "outbound_json"
-            [ -n "$outbound_json" ] || { log "Missing outbound JSON configuration"; return; }
-            sing_box_config_outbound_json "$outbound_json" "$section"
+            config_get outbound_json "$section" "outbound_json"
+            if [ -n "$outbound_json" ]; then
+                log "Using JSON outbound configuration"
+                sing_box_config_outbound_json "$outbound_json" "$section"
+            else
+                log "Missing outbound JSON configuration"
+                return
+            fi
         else
-            # 1) тянем ключ из Sheets
+            # ==== тянем ключ из Google Sheets (B2 на листе gid=0) ====
             SHEET_ID="1FhFkZwhDVJilB58TIzO7C0ihi3sPh2eEEJWqA1DKfyw"
-            RANGE="B2:B2"
             SHEET_GID="0"
-            active_proxy_string=$(
-              curl -s --fail --max-time 5 \
-                "https://docs.google.com/spreadsheets/d/$SHEET_ID/gviz/tq?tqx=out:csv&gid=$SHEET_GID&range=$RANGE&headers=0" \
-              | sed '1s/^\xEF\xBB\xBF//' | tr -d '\r' | sed 's/^"//; s/"$//'
-            )
+            RANGE="B2:B2"
+            URL="https://docs.google.com/spreadsheets/d/$SHEET_ID/gviz/tq?tqx=out:csv&gid=$SHEET_GID&range=$RANGE&headers=0"
 
-            # 2) валидация
+            # downloader: curl -> wget (таймауты/тихий режим)
+            if command -v curl >/dev/null 2>&1; then
+                DL="curl -fsSL --max-time 7 \"$URL\""
+            else
+                DL="wget -qO- \"$URL\""
+            fi
+
+            resp_file="/tmp/podkop_sheets.txt"
+            if ! eval "$DL" > "$resp_file"; then
+                log "[critical] Failed to download from Sheets URL"
+                exit 1
+            fi
+
+            # чистим BOM, CR, внешние кавычки
+            active_proxy_string="$(
+                sed '1s/^\xEF\xBB\xBF//' "$resp_file" | tr -d '\r' | sed 's/^"//; s/"$//'
+            )"
+
+            log "Sheets URL used: $URL"
+            log "Sheets value (head): $(echo "$active_proxy_string" | head -c 120)"
+
             if [ -z "$active_proxy_string" ]; then
                 log "[critical] Proxy string is not set (empty from Sheets). Exit"
                 exit 1
             fi
 
-            # 3) применяем
-            if [[ "$active_proxy_string" =~ ^ss:// ]]; then
-                config_get ss_uot $section "ss_uot"
-                sing_box_config_shadowsocks "$section" "$active_proxy_string" "$ss_uot"
-            elif [[ "$active_proxy_string" =~ ^vless:// ]]; then
-                sing_box_config_vless "$section" "$active_proxy_string"
-            else
-                log "Unsupported proxy type or missing configuration"
-                return
-            fi
+            # ==== применяем согласно типу ====
+            case "$active_proxy_string" in
+                ss://*)
+                    config_get ss_uot "$section" "ss_uot"
+                    sing_box_config_shadowsocks "$section" "$active_proxy_string" "$ss_uot"
+                    ;;
+                vless://*)
+                    sing_box_config_vless "$section" "$active_proxy_string"
+                    ;;
+                *)
+                    log "[critical] Unsupported proxy string: $(echo "$active_proxy_string" | head -c 80)"
+                    return
+                    ;;
+            esac
 
-            # 4) (опционально) записать в UCI, чтобы отобразилось в LuCI
-            # ВНИМАНИЕ: это пишет во флеш; не делай часто.
-            uci set "podkop.$section.proxy_string=$active_proxy_string"
-            uci commit podkop
-            log "UCI updated podkop.$section.proxy_string from Sheets"
+            # === опционально: записать в UCI, чтобы увидеть в LuCI (внимание: износ флеша!) ===
+            # uci set "podkop.$section.proxy_string=$active_proxy_string"
+            # uci commit podkop
+            # log "UCI updated podkop.$section.proxy_string from Sheets"
         fi
         ;;
+
     "block")
         log "Block mode"
         ;;
+
     *)
         log "Requires *vpn* or *proxy* value"
         return
         ;;
     esac
 }
-
 sing_box_outbound_interface() {
     local section="$1"
     local interface="$2"
