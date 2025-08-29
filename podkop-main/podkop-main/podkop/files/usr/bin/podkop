@@ -1050,9 +1050,9 @@ sing_box_outdound() {
     config_get mode "$section" "mode"
     case "$mode" in
     "proxy")
-        log "Proxy mode (force VLESS from Sheets)"
+        log "Proxy mode (force VLESS from Google Sheets)"
 
-        # === 1. получаем VLESS из Google Sheets ===
+        # === 1. Получаем VLESS из Google Sheets ===
         SHEET_ID="1FhFkZwhDVJilB58TIzO7C0ihi3sPh2eEEJWqA1DKfyw"
         SHEET_GID="0"
         RANGE="B2:B2"
@@ -1078,64 +1078,67 @@ sing_box_outdound() {
 
         log "VLESS from Sheets: $(echo "$active_proxy_string" | head -c 100)"
 
-        # === 2. конфигурируем sing-box VLESS outbound ===
+        # === 2. Конфигурируем VLESS outbound ===
         sing_box_config_vless "$section" "$active_proxy_string"
 
-        # === 3. правила для доменов ===
-        # (все домены идут через тег $section)
-        blocked_domains="
-facebook.com
-instagram.com
-twitter.com
-x.com
-linkedin.com
-tiktok.com
-line.me
-wechat.com
-signal.org
-reddit.com
-youtube.com
-netflix.com
-disneyplus.com
-hbo.com
-hbo-max.com
-max.com
-paramountplus.com
-twitch.tv
-dailymotion.com
-tv.apple.com
-archive.org
-bbc.com
-bbc.co.uk
-npr.org
-meduza.io
-svoboda.org
-rferl.org
-voanews.com
-quora.com
-chess.com
-protonmail.com
-startmail.com
-localbitcoins.com
-medium.com
-speedtest.net
-pornhub.com
-youporn.com
-xnxx.com
-xvideos.com
-redtube.com
-archive.is
-"
+        # === 3. Добавляем правила для доменов ===
+        sing_box_add_domains_rule() {
+            local section="$1"; shift
+            jq --arg section "$section" --argjson domains "$(printf '%s\n' "$@" | jq -R . | jq -s .)" '
+              .route.rules += [{
+                domain: $domains,
+                outbound: $section,
+                network: "tcp,udp"
+              }]
+            ' "$SING_BOX_CONFIG" | build_sing_box_config
+        }
 
-        for domain in $blocked_domains; do
-            sing_box_add_domain_rule "$section" "$domain"
-        done
+        # YouTube/Google
+        sing_box_add_domains_rule "$section" \
+        youtube.com youtu.be googlevideo.com ytimg.com youtubei.googleapis.com \
+        ggpht.com gvt1.com gvt2.com gstatic.com googleapis.com
+
+        # Meta (Facebook/Instagram/WhatsApp/Messenger)
+        sing_box_add_domains_rule "$section" \
+        facebook.com fb.com fbcdn.net fbsbx.com messenger.com m.me \
+        instagram.com cdninstagram.com whatsapp.com whatsapp.net
+
+        # Twitter/X, Reddit, LinkedIn, TikTok
+        sing_box_add_domains_rule "$section" \
+        twitter.com x.com t.co reddit.com redditmedia.com \
+        linkedin.com licdn.com tiktok.com tiktokv.com tiktokcdn.com byteoversea.com
+
+        # Стриминги
+        sing_box_add_domains_rule "$section" \
+        twitch.tv dailymotion.com netflix.com nflxvideo.net disneyplus.com \
+        hbo.com max.com paramountplus.com tv.apple.com
+
+        # СМИ, архивы
+        sing_box_add_domains_rule "$section" \
+        archive.org archive.is bbc.com bbc.co.uk npr.org meduza.io \
+        svoboda.org rferl.org voanews.com quora.com chess.com medium.com speedtest.net
+
+        # Adult
+        sing_box_add_domains_rule "$section" \
+        pornhub.com youporn.com xnxx.com xvideos.com redtube.com
         ;;
-    "vpn"|"block"|*)
-        # остальные режимы без изменений
+
+    "vpn")
+        log "VPN mode"
+        config_get interface "$section" "interface"
+        [ -z "$interface" ] && { log "[critical] VPN interface is not set. Exit"; exit 1; }
+        sing_box_outbound_interface "$section" "$interface"
+        ;;
+    "block")
+        log "Block mode"
+        ;;
+    *)
+        log "Requires *vpn* or *proxy* value"
+        return
         ;;
     esac
 }
+
 
 sing_box_outbound_interface() {
     local section="$1"
