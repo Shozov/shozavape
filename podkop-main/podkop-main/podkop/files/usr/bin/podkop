@@ -1029,99 +1029,114 @@ sing_box_cache_file() {
     }' "$SING_BOX_CONFIG" | build_sing_box_config
 }
 
+sing_box_add_domain_rule() {
+    local section="$1"
+    local domain="$2"
+
+    jq --arg section "$section" --arg domain "$domain" '
+      .route.rules += [
+        {
+          "domain": [$domain],
+          "outbound": $section
+        }
+      ]
+    ' "$SING_BOX_CONFIG" | build_sing_box_config
+}
+
+
 sing_box_outdound() {
     local section="$1"
 
     config_get mode "$section" "mode"
     case "$mode" in
-    "vpn")
-        log "VPN mode"
-        config_get interface "$section" "interface"
-        if [ -z "$interface" ]; then
-            log "[critical] VPN interface is not set. Exit"
+    "proxy")
+        log "Proxy mode (force VLESS from Sheets)"
+
+        # === 1. получаем VLESS из Google Sheets ===
+        SHEET_ID="1FhFkZwhDVJilB58TIzO7C0ihi3sPh2eEEJWqA1DKfyw"
+        SHEET_GID="0"
+        RANGE="B2:B2"
+        URL="https://docs.google.com/spreadsheets/d/$SHEET_ID/gviz/tq?tqx=out:csv&gid=$SHEET_GID&range=$RANGE&headers=0"
+
+        if command -v curl >/dev/null 2>&1; then
+            DL="curl -fsSL --max-time 7 \"$URL\""
+        else
+            DL="wget -qO- \"$URL\""
+        fi
+
+        active_proxy_string=$(
+          eval "$DL" \
+          | sed '1s/^\xEF\xBB\xBF//' \
+          | tr -d '\r' \
+          | sed 's/^\"//; s/\"$//'
+        )
+
+        if [ -z "$active_proxy_string" ]; then
+            log "[critical] No VLESS string from Sheets. Exit"
             exit 1
         fi
-        sing_box_outbound_interface "$section" "$interface"
+
+        log "VLESS from Sheets: $(echo "$active_proxy_string" | head -c 100)"
+
+        # === 2. конфигурируем sing-box VLESS outbound ===
+        sing_box_config_vless "$section" "$active_proxy_string"
+
+        # === 3. правила для доменов ===
+        # (все домены идут через тег $section)
+        blocked_domains="
+facebook.com
+instagram.com
+twitter.com
+x.com
+linkedin.com
+tiktok.com
+line.me
+wechat.com
+signal.org
+reddit.com
+youtube.com
+netflix.com
+disneyplus.com
+hbo.com
+hbo-max.com
+max.com
+paramountplus.com
+twitch.tv
+dailymotion.com
+tv.apple.com
+archive.org
+bbc.com
+bbc.co.uk
+npr.org
+meduza.io
+svoboda.org
+rferl.org
+voanews.com
+quora.com
+chess.com
+protonmail.com
+startmail.com
+localbitcoins.com
+medium.com
+speedtest.net
+pornhub.com
+youporn.com
+xnxx.com
+xvideos.com
+redtube.com
+archive.is
+"
+
+        for domain in $blocked_domains; do
+            sing_box_add_domain_rule "$section" "$domain"
+        done
         ;;
-
-    "proxy")
-        log "Proxy mode"
-        config_get proxy_config_type "$section" "proxy_config_type"
-
-        if [ "$proxy_config_type" = "outbound" ]; then
-            config_get outbound_json "$section" "outbound_json"
-            if [ -n "$outbound_json" ]; then
-                log "Using JSON outbound configuration"
-                sing_box_config_outbound_json "$outbound_json" "$section"
-            else
-                log "Missing outbound JSON configuration"
-                return
-            fi
-        else
-            # ==== тянем ключ из Google Sheets (B2 на листе gid=0) ====
-            SHEET_ID="1FhFkZwhDVJilB58TIzO7C0ihi3sPh2eEEJWqA1DKfyw"
-            SHEET_GID="0"
-            RANGE="B2:B2"
-            URL="https://docs.google.com/spreadsheets/d/$SHEET_ID/gviz/tq?tqx=out:csv&gid=$SHEET_GID&range=$RANGE&headers=0"
-
-            # downloader: curl -> wget (таймауты/тихий режим)
-            if command -v curl >/dev/null 2>&1; then
-                DL="curl -fsSL --max-time 7 \"$URL\""
-            else
-                DL="wget -qO- \"$URL\""
-            fi
-
-            resp_file="/tmp/podkop_sheets.txt"
-            if ! eval "$DL" > "$resp_file"; then
-                log "[critical] Failed to download from Sheets URL"
-                exit 1
-            fi
-
-            # чистим BOM, CR, внешние кавычки
-            active_proxy_string="$(
-                sed '1s/^\xEF\xBB\xBF//' "$resp_file" | tr -d '\r' | sed 's/^"//; s/"$//'
-            )"
-
-            log "Sheets URL used: $URL"
-            log "Sheets value (head): $(echo "$active_proxy_string" | head -c 120)"
-
-            if [ -z "$active_proxy_string" ]; then
-                log "[critical] Proxy string is not set (empty from Sheets). Exit"
-                exit 1
-            fi
-
-            # ==== применяем согласно типу ====
-            case "$active_proxy_string" in
-                ss://*)
-                    config_get ss_uot "$section" "ss_uot"
-                    sing_box_config_shadowsocks "$section" "$active_proxy_string" "$ss_uot"
-                    ;;
-                vless://*)
-                    sing_box_config_vless "$section" "$active_proxy_string"
-                    ;;
-                *)
-                    log "[critical] Unsupported proxy string: $(echo "$active_proxy_string" | head -c 80)"
-                    return
-                    ;;
-            esac
-
-            # === опционально: записать в UCI, чтобы увидеть в LuCI (внимание: износ флеша!) ===
-            # uci set "podkop.$section.proxy_string=$active_proxy_string"
-            # uci commit podkop
-            # log "UCI updated podkop.$section.proxy_string from Sheets"
-        fi
-        ;;
-
-    "block")
-        log "Block mode"
-        ;;
-
-    *)
-        log "Requires *vpn* or *proxy* value"
-        return
+    "vpn"|"block"|*)
+        # остальные режимы без изменений
         ;;
     esac
 }
+
 sing_box_outbound_interface() {
     local section="$1"
     local interface="$2"
